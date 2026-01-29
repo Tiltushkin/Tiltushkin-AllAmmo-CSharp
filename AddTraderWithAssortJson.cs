@@ -146,12 +146,7 @@ public class AddTraderWithAssortJson(
             }
         }
 
-        if (configNeedsSaving)
-        {
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(configPath, JsonSerializer.Serialize(config, options));
-            logger.Info("[AllAmmo] Config file updated/created.");
-        }
+        List<string> invalidConfigItems = new();
 
         foreach (var kvp in config.Items)
         {
@@ -159,7 +154,13 @@ public class AddTraderWithAssortJson(
             var settings = kvp.Value;
 
             var item = assort.Items.FirstOrDefault(x => x.Id == itemId);
-            if (item == null) continue;
+
+            if (item == null)
+            {
+                logger.Error($"[AllAmmo] Item ID {itemId} ({settings.ItemName}) found in config but missing in assort.json! Marking for removal.");
+                invalidConfigItems.Add(itemId);
+                continue;
+            }
 
             if (settings.StockCount == -1)
             {
@@ -193,6 +194,23 @@ public class AddTraderWithAssortJson(
                     priceObj.Count = Math.Max(1, Math.Round(newPrice));
                 }
             }
+        }
+
+        if (invalidConfigItems.Count > 0)
+        {
+            foreach (var idToRemove in invalidConfigItems)
+            {
+                config.Items.Remove(idToRemove);
+            }
+            configNeedsSaving = true;
+            logger.Info($"[AllAmmo] Cleaned up {invalidConfigItems.Count} invalid items from config.");
+        }
+
+        if (configNeedsSaving)
+        {
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            File.WriteAllText(configPath, JsonSerializer.Serialize(config, options));
+            logger.Info("[AllAmmo] Config file updated.");
         }
     }
 }
