@@ -1,13 +1,12 @@
+using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
-using SPTarkov.Server.Core.Helpers;
+using SPTarkov.Server.Core.Helpers.Server;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Spt.Mod;
-using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Routers;
-using SPTarkov.Server.Core.Servers;
-using SPTarkov.Server.Core.Services;
+using SPTarkov.Server.Core.Services.Locales;
 using SPTarkov.Server.Core.Utils;
 using System.Reflection;
 using System.Text.Json;
@@ -16,40 +15,39 @@ using Path = System.IO.Path;
 
 namespace _allAmmo;
 
-public record ModMetadata : AbstractModMetadata
+public record ModMetadata : IModMetadata
 {
-    public override string ModGuid { get; init; } = "com.tiltushkin.allammo";
-    public override string Name { get; init; } = "Tiltushkin-AllAmmo";
-    public override string Author { get; init; } = "Tiltushkin";
-    public override List<string>? Contributors { get; init; } = ["Tiltushkin"];
-    public override SemanticVersioning.Version Version { get; init; } = new("1.3.0");
-    public override SemanticVersioning.Range SptVersion { get; init; } = new("~4.0.0");
-    public override List<string>? Incompatibilities { get; init; } = [];
-    public override Dictionary<string, SemanticVersioning.Range>? ModDependencies { get; init; }
-    public override string Url { get; init; } = "https://github.com/Tiltushkin/Tiltushkin-AllAmmo-CSharp/";
-    public override bool? IsBundleMod { get; init; } = false;
-    public override string? License { get; init; } = "MIT";
+    public string ModGuid { get; init; } = "com.tiltushkin.allammo";
+    public string Name { get; init; } = "Tiltushkin-AllAmmo";
+    public string Author { get; init; } = "Tiltushkin";
+    public List<string>? Contributors { get; init; } = ["Tiltushkin"];
+    public SemanticVersioning.Version Version { get; init; } = new("1.5.0");
+    public SemanticVersioning.Range SptVersion { get; init; } = new("~4.1.3");
+    public List<string>? Incompatibilities { get; init; } = [];
+    public Dictionary<string, SemanticVersioning.Range>? ModDependencies { get; init; }
+    public string? Url { get; init; } = "https://github.com/Tiltushkin/Tiltushkin-AllAmmo-CSharp/";
+    public string License { get; init; } = "MIT";
+    public bool HasPrepatcher { get; init; } = false;
 }
 
-[Injectable(TypePriority = OnLoadOrder.PostDBModLoader + 1)]
+[Injectable(TypePriority = OnLoadOrder.TraderRegistration + 1)]
 public class AddTraderWithAssortJson(
     ModHelper modHelper,
     ImageRouter imageRouter,
-    ConfigServer configServer,
+    TraderConfig traderConfig,
+    RagfairConfig ragfairConfig,
     TimeUtil timeUtil,
     AddCustomTraderHelper addCustomTraderHelper,
-    ISptLogger<AddTraderWithAssortJson> logger,
-    DatabaseService databaseService
+    LocaleService localeService,
+    ISptLogger<AddTraderWithAssortJson> logger
 )
     : IOnLoad
 {
-    public Task OnLoad()
+    public async Task OnLoadAsync(CancellationToken cancellationToken)
     {
         try
         {
-
-            var traderConfig = configServer.GetConfig<TraderConfig>();
-            var ragfairConfig = configServer.GetConfig<RagfairConfig>();
+            cancellationToken.ThrowIfCancellationRequested();
 
             var pathToMod = modHelper.GetAbsolutePathToModFolder(Assembly.GetExecutingAssembly());
             var traderImagePath = Path.Combine(pathToMod, "data/vafelz.jpg");
@@ -57,7 +55,11 @@ public class AddTraderWithAssortJson(
 
             imageRouter.AddRoute(traderBase.Avatar!.Replace(".jpg", ""), traderImagePath);
 
-            addCustomTraderHelper.SetTraderUpdateTime(traderConfig, traderBase, timeUtil.GetHoursAsSeconds(1), timeUtil.GetHoursAsSeconds(2));
+            addCustomTraderHelper.SetTraderUpdateTime(
+                traderConfig,
+                traderBase,
+                timeUtil.GetHoursAsSeconds(1),
+                timeUtil.GetHoursAsSeconds(2));
 
             if (!ragfairConfig.Traders.TryAdd(traderBase.Id, true))
             {
@@ -69,22 +71,24 @@ public class AddTraderWithAssortJson(
 
             var assort = modHelper.GetJsonDataFromFile<TraderAssort>(pathToMod, "data/assort.json");
 
-            ProcessConfiguration(pathToMod, assort);
+            await ProcessConfigurationAsync(pathToMod, assort, cancellationToken);
 
             addCustomTraderHelper.OverwriteTraderAssort(traderBase.Id, assort);
 
             logger.Info($"[AllAmmo] Trader {traderBase.Nickname} loaded successfully.");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             logger.Error($"[AllAmmo] Critical error: {ex.Message ?? "Unknown error"}");
             logger.Error(ex.StackTrace ?? "No stack trace");
         }
-
-        return Task.CompletedTask;
     }
 
-    private void ProcessConfiguration(string modPath, TraderAssort assort)
+    private async Task ProcessConfigurationAsync(string modPath, TraderAssort assort, CancellationToken cancellationToken)
     {
         var configPath = Path.Combine(modPath, "config/config.json");
         var configDir = Path.GetDirectoryName(configPath);
@@ -101,8 +105,12 @@ public class AddTraderWithAssortJson(
         {
             try
             {
-                var jsonContent = File.ReadAllText(configPath);
+                var jsonContent = await File.ReadAllTextAsync(configPath, cancellationToken);
                 config = JsonSerializer.Deserialize<ModConfig>(jsonContent) ?? new ModConfig();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -114,26 +122,29 @@ public class AddTraderWithAssortJson(
             configNeedsSaving = true;
         }
 
-        if (!config.EnableConfig) return;
+        if (!config.EnableConfig)
+        {
+            return;
+        }
 
-        var globalLocales = databaseService.GetTables().Locales.Global;
-        var hasEnLocale = globalLocales.TryGetValue("en", out var enLocaleLazy);
+        var enDict = localeService.GetLocaleDb("en");
 
         foreach (var item in assort.Items)
         {
-            if (!assort.BarterScheme.ContainsKey(item.Id)) continue;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!assort.BarterScheme.ContainsKey(item.Id))
+            {
+                continue;
+            }
 
             if (!config.Items.ContainsKey(item.Id))
             {
                 string itemName = "Unknown Item";
 
-                if (hasEnLocale && enLocaleLazy != null)
+                if (enDict.TryGetValue($"{item.Template} Name", out var name))
                 {
-                    var enDict = enLocaleLazy.Value;
-                    if (enDict!.TryGetValue($"{item.Template} Name", out var name))
-                    {
-                        itemName = name;
-                    }
+                    itemName = name;
                 }
 
                 config.Items.Add(item.Id, new ItemSettings
@@ -150,6 +161,8 @@ public class AddTraderWithAssortJson(
 
         foreach (var kvp in config.Items)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var itemId = kvp.Key;
             var settings = kvp.Value;
 
@@ -165,13 +178,14 @@ public class AddTraderWithAssortJson(
             if (settings.StockCount == -1)
             {
                 assort.Items.Remove(item);
-                if (assort.BarterScheme.ContainsKey(itemId)) assort.BarterScheme.Remove(itemId);
-                if (assort.LoyalLevelItems.ContainsKey(itemId)) assort.LoyalLevelItems.Remove(itemId);
+                assort.BarterScheme.Remove(itemId);
+                assort.LoyalLevelItems.Remove(itemId);
                 continue;
             }
 
             if (settings.StockCount > 0)
             {
+                item.Upd ??= new Upd();
                 item.Upd.StackObjectsCount = settings.StockCount;
                 item.Upd.UnlimitedCount = false;
             }
@@ -180,6 +194,7 @@ public class AddTraderWithAssortJson(
             {
                 logger.Warning($"[AllAmmo] PriceMultiplier cannot be 0 for item '{settings.ItemName}'. Using default 1.0.");
                 settings.PriceMultiplier = 1.0f;
+                configNeedsSaving = true;
             }
 
             if (Math.Abs(settings.PriceMultiplier - 1.0f) > 0.001f && assort.BarterScheme.TryGetValue(itemId, out var schemes))
@@ -189,7 +204,7 @@ public class AddTraderWithAssortJson(
                     var priceObj = schemes[0][0];
 
                     double currentPrice = priceObj.Count.GetValueOrDefault(1.0);
-                    double newPrice = currentPrice * (double)settings.PriceMultiplier;
+                    double newPrice = currentPrice * settings.PriceMultiplier;
 
                     priceObj.Count = Math.Max(1, Math.Round(newPrice));
                 }
@@ -202,6 +217,7 @@ public class AddTraderWithAssortJson(
             {
                 config.Items.Remove(idToRemove);
             }
+
             configNeedsSaving = true;
             logger.Info($"[AllAmmo] Cleaned up {invalidConfigItems.Count} invalid items from config.");
         }
@@ -209,7 +225,7 @@ public class AddTraderWithAssortJson(
         if (configNeedsSaving)
         {
             var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(configPath, JsonSerializer.Serialize(config, options));
+            await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(config, options), cancellationToken);
             logger.Info("[AllAmmo] Config file updated.");
         }
     }
